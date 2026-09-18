@@ -72,7 +72,7 @@ namespace Simulator
         {
             await using var conn = new NpgsqlConnection(_connectionString);
             await conn.OpenAsync();
-
+    
             string upsertSql = @"
             INSERT INTO Telemetries (
                 DeviceId, DeviceStatus, FirmwareVersion, Latitude, Longitude, Altitude,

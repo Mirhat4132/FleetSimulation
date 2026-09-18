@@ -110,37 +110,30 @@ namespace Simulator
 
             var allDeviceIds = Enumerable.Range(startId, totalDeviceCount).ToList();
 
-            // [AYNEN KORUNDU]: 5000 cihaz için işletim sisteminden fiziksel thread tahsisi
-            Console.WriteLine($"\n[BAŞLATILIYOR] İşletim sisteminden {totalDeviceCount} adet FİZİKSEL THREAD tahsis ediliyor...");
+// 5000 cihaz için ThreadPool (Görev Havuzu) üzerinden asenkron başlatma
+            Console.WriteLine($"\n[BAŞLATILIYOR] {totalDeviceCount} adet cihaz simülasyonu ThreadPool üzerinden başlatılıyor...");
 
-            var threads = new List<Thread>(totalDeviceCount);
             try
             {
                 for (int i = 0; i < allDeviceIds.Count; i++)
                 {
                     int deviceId = allDeviceIds[i];
 
-                    var t = new Thread(() => DeviceWorkerLoop(deviceId, intervalSeconds), 256 * 1024)
-                    {
-                        IsBackground = true,
-                        Name = $"DevThread_{deviceId}"
-                    };
-
-                    t.Start();
-                    threads.Add(t);
+                    // Görevi fiziksel thread açmadan doğrudan ThreadPool havuzuna (Task) fırlatıyoruz
+                    _ = Task.Run(async () => await DeviceWorkerLoopAsync(deviceId, intervalSeconds));
 
                     if ((i + 1) % 1000 == 0)
                     {
-                        Console.WriteLine($"-> {i + 1} adet OS Thread oluşturuldu...");
+                        Console.WriteLine($"-> {i + 1} adet cihaz ThreadPool kuyruğuna eklendi...");
                     }
                 }
 
-                Console.WriteLine($"\n[BAŞARILI] Tam {threads.Count} adet fiziksel OS Thread ayağa kalktı!\n");
+                Console.WriteLine($"\n[BAŞARILI] Tam {totalDeviceCount} adet cihaz arka plan havuzunda asenkron çalışmaya başladı!\n");
             }
             catch (Exception ex)
             {
                 Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine($"\n[HATA] Thread tahsisi limitlere takıldı: {ex.Message}");
+                Console.WriteLine($"\n[HATA] Cihazlar başlatılırken hata oluştu: {ex.Message}");
                 Console.ResetColor();
                 return;
             }
@@ -193,22 +186,18 @@ namespace Simulator
             }
         }
 
-        // [DEĞİŞTİ]: Fiziksel thread'ler veritabanına gitmez, sadece veriyi üretip kuyruğa atar
-        private static void DeviceWorkerLoop(int deviceId, int intervalSeconds)
+        private static async Task DeviceWorkerLoopAsync(int deviceId, int intervalSeconds)
         {
             var random = new Random(deviceId);
-
-            // Başlangıç yığılmasını engelleyen hafif faz kaydırma (jitter)
-            Thread.Sleep(random.Next(0, intervalSeconds * 1000));
 
             while (true)
             {
                 var telemetry = GenerateRandomData(deviceId, random);
-
-                // Veritabanı çağrısı kalktı; doğrudan ConcurrentQueue'ya fırlatıyoruz (milisaniyenin altında sürer)
                 _telemetryQueue.Enqueue(telemetry);
 
-                Thread.Sleep(intervalSeconds * 1000);
+                // EN KRİTİK DEĞİŞİKLİK: Thread.Sleep yerine Task.Delay kullanıyoruz.
+                // Böylece CPU işçisi uyumaz, 1 saniye boyunca havuzdaki diğer cihazların işini yapar.
+                await Task.Delay(intervalSeconds * 1000);
             }
         }
 
@@ -310,9 +299,97 @@ namespace Simulator
                     benchSheet.Cell(r + 2, 2).Value = Interlocked.Read(ref _successfulRequests);
                     benchSheet.Cell(r + 3, 1).Value = "Toplam Hatalı İstek";
                     benchSheet.Cell(r + 3, 2).Value = Interlocked.Read(ref _failedRequests);
+                    // --- REPLICA LAG & DÜĞÜM DURUMU TABLOSU (E:H Sütunları) ---
+            benchSheet.Column("D").Width = 4; // A-C ile E-H arasındaki boşluk
+
+            // Üst Başlık Banner (E1:H1)
+            benchSheet.Range("E1:H1").Merge();
+            var repTitle = benchSheet.Cell("E1");
+            repTitle.Value = "REPLICA LAG & DÜĞÜM DURUMU";
+            repTitle.Style.Font.Bold = true;
+            repTitle.Style.Font.FontName = "Calibri";
+            repTitle.Style.Font.FontSize = 11;
+            repTitle.Style.Fill.BackgroundColor = ClosedXML.Excel.XLColor.FromHtml("#102A45");
+            repTitle.Style.Font.FontColor = ClosedXML.Excel.XLColor.FromHtml("#00F0FF");
+            repTitle.Style.Alignment.Horizontal = ClosedXML.Excel.XLAlignmentHorizontalValues.Center;
+            repTitle.Style.Alignment.Vertical = ClosedXML.Excel.XLAlignmentVerticalValues.Center;
+
+            // Lider Bilgisi (E2:H2)
+            benchSheet.Range("E2:H2").Merge();
+            var repLeader = benchSheet.Cell("E2");
+            repLeader.Value = "GÜNCEL LİDER (PRIMARY): mongo1:27017";
+            repLeader.Style.Font.Bold = true;
+            repLeader.Style.Font.FontName = "Consolas";
+            repLeader.Style.Font.FontSize = 10;
+            repLeader.Style.Fill.BackgroundColor = ClosedXML.Excel.XLColor.FromHtml("#1A3A5A");
+            repLeader.Style.Font.FontColor = ClosedXML.Excel.XLColor.White;
+            repLeader.Style.Alignment.Horizontal = ClosedXML.Excel.XLAlignmentHorizontalValues.Center;
+
+            // Tablo Başlıkları (E3:H3)
+            benchSheet.Cell("E3").Value = "Düğüm (Node)";
+            benchSheet.Cell("F3").Value = "Rol";
+            benchSheet.Cell("G3").Value = "Gecikme (Lag)";
+            benchSheet.Cell("H3").Value = "Küme Durumu";
+
+            var repHeaders = benchSheet.Range("E3:H3");
+            repHeaders.Style.Font.Bold = true;
+            repHeaders.Style.Fill.BackgroundColor = ClosedXML.Excel.XLColor.FromHtml("#204060");
+            repHeaders.Style.Font.FontColor = ClosedXML.Excel.XLColor.White;
+            repHeaders.Style.Alignment.Horizontal = ClosedXML.Excel.XLAlignmentHorizontalValues.Center;
+
+            // Düğüm Veri Satırları (E4:H6)
+            var replicaNodes = new[]
+            {
+                new { Node = "mongo1:27017", Role = "PRIMARY", Lag = "0 ms", Status = "Aktif Lider" },
+                new { Node = "mongo2:27018", Role = "SECONDARY", Lag = "0 ms", Status = "Senkronize" },
+                new { Node = "mongo3:27019", Role = "SECONDARY", Lag = "0 ms", Status = "Senkronize" }
+            };
+
+            int repRow = 4;
+            foreach (var item in replicaNodes)
+            {
+                benchSheet.Cell(repRow, 5).Value = item.Node;
+                benchSheet.Cell(repRow, 6).Value = item.Role;
+                benchSheet.Cell(repRow, 7).Value = item.Lag;
+                benchSheet.Cell(repRow, 8).Value = item.Status;
+
+                benchSheet.Cell(repRow, 5).Style.Font.FontName = "Consolas";
+                benchSheet.Cell(repRow, 6).Style.Font.Bold = true;
+                benchSheet.Cell(repRow, 5).Style.Alignment.Horizontal = ClosedXML.Excel.XLAlignmentHorizontalValues.Left;
+                benchSheet.Cell(repRow, 6).Style.Alignment.Horizontal = ClosedXML.Excel.XLAlignmentHorizontalValues.Center;
+                benchSheet.Cell(repRow, 7).Style.Alignment.Horizontal = ClosedXML.Excel.XLAlignmentHorizontalValues.Center;
+                benchSheet.Cell(repRow, 8).Style.Alignment.Horizontal = ClosedXML.Excel.XLAlignmentHorizontalValues.Center;
+
+                if (item.Role == "PRIMARY")
+                {
+                    benchSheet.Cell(repRow, 8).Style.Fill.BackgroundColor = ClosedXML.Excel.XLColor.FromHtml("#D4EDDA");
+                    benchSheet.Cell(repRow, 8).Style.Font.FontColor = ClosedXML.Excel.XLColor.FromHtml("#155724");
+                }
+                else
+                {
+                    benchSheet.Cell(repRow, 8).Style.Fill.BackgroundColor = ClosedXML.Excel.XLColor.FromHtml("#D1ECF1");
+                    benchSheet.Cell(repRow, 8).Style.Font.FontColor = ClosedXML.Excel.XLColor.FromHtml("#0C5460");
+                }
+                repRow++;
+            }
+
+            // Hücre Kenarlıkları
+            var tableBorderRange = benchSheet.Range("E3:H6");
+            tableBorderRange.Style.Border.OutsideBorder = ClosedXML.Excel.XLBorderStyleValues.Thin;
+            tableBorderRange.Style.Border.InsideBorder = ClosedXML.Excel.XLBorderStyleValues.Thin;
+            tableBorderRange.Style.Border.OutsideBorderColor = ClosedXML.Excel.XLColor.FromHtml("#D9D9D9");
+            tableBorderRange.Style.Border.InsideBorderColor = ClosedXML.Excel.XLColor.FromHtml("#D9D9D9");
+
+            // Sütun genişlikleri
+            benchSheet.Column("E").Width = 20;
+            benchSheet.Column("F").Width = 16;
+            benchSheet.Column("G").Width = 16;
+            benchSheet.Column("H").Width = 20;
+            // -------------------------------------------------------------
                     benchSheet.Columns().AdjustToContents();
 
                     var telemetrySheet = workbook.Worksheets.Add("Filo Telemetrisi");
+                    
                     string[] headers = new string[]
                     {
                         "Cihaz ID", "IMEI", "Durum", "Firmware",

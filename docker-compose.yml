@@ -1,6 +1,18 @@
 version: '3.8'
 
 services:
+  postgres:
+    image: postgres:latest
+    container_name: postgres_db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: FleetDb
+    ports:
+      - "5432:5432"
+    networks:
+      - mongo-net
+
   mongo1:
     image: mongo:latest
     container_name: mongo1

@@ -12,19 +12,24 @@ namespace Simulator
 
         public async Task BulkUpsertTelemetryAsync(List<DeviceTelemetry> batch)     
 {
-    if (batch == null || batch.Count == 0) return;
+    var writes = batch.Select(item =>
+{
+    var filter = Builders<DeviceTelemetry>.Filter.Eq(x => x.DeviceId, item.DeviceId);
+    
+    var update = Builders<DeviceTelemetry>.Update
+        .SetOnInsert(x => x.CreatedAt, item.CreatedAt) // Yalnızca ilk kayıtta yazar
+        .Set(x => x.UpdatedAt, DateTime.UtcNow)        // Her seferinde günceller
+        .Set(x => x.DeviceStatus, item.DeviceStatus)
+        .Set(x => x.FirmwareVersion, item.FirmwareVersion)
+        .Set(x => x.Network, item.Network)
+        .Set(x => x.Gps, item.Gps)
+        .Set(x => x.Engine, item.Engine)
+        .Set(x => x.State, item.State);
 
-    var writes = new List<WriteModel<DeviceTelemetry>>();
+    return new UpdateOneModel<DeviceTelemetry>(filter, update) { IsUpsert = true };
+});
 
-    foreach (var telemetry in batch)
-    {
-        var filter = Builders<DeviceTelemetry>.Filter.Eq(x => x.DeviceId, telemetry.DeviceId);
-        var upsert = new ReplaceOneModel<DeviceTelemetry>(filter, telemetry) { IsUpsert = true };
-        writes.Add(upsert);
-    }
-
-    // IsOrdered = false: Bir hata çıksa bile diğerlerini durdurmaz, çok daha hızlı yazar
-    await _collection.BulkWriteAsync(writes, new BulkWriteOptions { IsOrdered = false });
+await _collection.BulkWriteAsync(writes);
 }
 
         private readonly MongoClient _client;
